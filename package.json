@@ -45,10 +45,10 @@
   "homepage": "https://pdfsmaller.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smither777/pdfsmaller-pdfencrypt.git"
+    "url": "git+https://github.com/smither777/pdf-encrypt.git"
   },
   "bugs": {
-    "url": "https://github.com/smither777/pdfsmaller-pdfencrypt/issues"
+    "url": "https://github.com/smither777/pdf-encrypt/issues"
   },
   "license": "MIT",
   "engines": {
