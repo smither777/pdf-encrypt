@@ -115,11 +115,13 @@ const encrypted = await encryptPDF(pdfBytes, 'password', {
 | Reader Support | Modern readers | All readers |
 | Recommended | Yes | Legacy only |
 
-## Companion Package
+## Related Packages
 
-Use with [@pdfsmaller/pdf-decrypt](https://www.npmjs.com/package/@pdfsmaller/pdf-decrypt) for decryption.
-
-For lightweight RC4-only encryption, see [@pdfsmaller/pdf-encrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-encrypt-lite) (~7KB).
+| Package | Description |
+|---------|-------------|
+| [@pdfsmaller/pdf-decrypt](https://www.npmjs.com/package/@pdfsmaller/pdf-decrypt) | Full decryption — AES-256 + RC4 (companion to this package) |
+| [@pdfsmaller/pdf-encrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-encrypt-lite) | Lightweight RC4-only encryption (~7KB) |
+| [@pdfsmaller/pdf-decrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-decrypt-lite) | Lightweight RC4-only decryption (~8KB) |
 
 ## License
 
