@@ -6,7 +6,8 @@
  * @license MIT
  */
 
-export { encryptPDF } from './pdf-encrypt.js';
+export { encryptPDF, AlreadyEncryptedError, PasswordEncodingError } from './pdf-encrypt.js';
+export { encodePasswordLegacy, encodePasswordAES256, saslPrep } from './password-encoding.js';
 export { md5, RC4, hexToBytes, bytesToHex } from './crypto-rc4.js';
 export {
   sha256, sha384, sha512,

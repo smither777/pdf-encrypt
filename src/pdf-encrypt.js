@@ -14,13 +14,42 @@
  */
 
 import { PDFDocument, PDFName, PDFHexString, PDFString, PDFDict, PDFArray, PDFRawStream, PDFNumber } from 'pdf-lib';
-import { md5, RC4, hexToBytes, bytesToHex } from './crypto-rc4.js';
+import { md5, RC4, bytesToHex } from './crypto-rc4.js';
 import {
   sha256, sha384, sha512,
   aes256CbcEncrypt, aes256CbcEncryptNoPad, aes256EcbEncryptBlock,
   importAES256Key, aes256CbcEncryptWithKey,
   computeHash2B, concat
 } from './crypto-aes.js';
+import {
+  encodePasswordLegacy, encodePasswordAES256, PasswordEncodingError
+} from './password-encoding.js';
+
+/**
+ * Thrown when the input PDF already has an /Encrypt dictionary.
+ *
+ * pdf-lib cannot decrypt, so `ignoreEncryption: true` hands us the *ciphertext*
+ * as if it were plaintext object data. Encrypting that again produces a file
+ * that opens with the new password but whose every stream and string is still
+ * encrypted under a key nobody has. Fail loudly instead.
+ */
+export class AlreadyEncryptedError extends Error {
+  constructor() {
+    super(
+      'This PDF is already password-protected. Remove the existing protection ' +
+      'before applying new encryption.'
+    );
+    this.name = 'AlreadyEncryptedError';
+    this.code = 'ALREADY_ENCRYPTED';
+  }
+}
+
+export { PasswordEncodingError };
+
+/** Errors that describe a caller mistake and must reach the caller unwrapped. */
+function isCallerError(error) {
+  return error instanceof AlreadyEncryptedError || error instanceof PasswordEncodingError;
+}
 
 // ========== PDF Standard Padding (for RC4) ==========
 
@@ -68,7 +97,9 @@ function buildPermissions(options) {
 // ========== RC4 Encryption (V=2, R=3) ==========
 
 function padPassword(password) {
-  const pwdBytes = new TextEncoder().encode(password);
+  // PDFDocEncoding, not UTF-8 — see password-encoding.js. UTF-8 here produced
+  // files that no conforming reader could open with a non-ASCII password.
+  const pwdBytes = encodePasswordLegacy(password);
   const padded = new Uint8Array(32);
   if (pwdBytes.length >= 32) {
     padded.set(pwdBytes.slice(0, 32));
@@ -150,14 +181,6 @@ function encryptObjectRC4(data, objectNum, generationNum, encryptionKey) {
 }
 
 // ========== AES-256 Encryption (V=5, R=6) ==========
-
-/**
- * Truncate password to 127 bytes (UTF-8) per PDF 2.0 spec
- */
-function saslPrepPassword(password) {
-  const bytes = new TextEncoder().encode(password);
-  return bytes.length > 127 ? bytes.slice(0, 127) : bytes;
-}
 
 /**
  * Generate cryptographically random bytes
@@ -282,29 +305,93 @@ async function encryptObjectAES256(data, cryptoKey) {
 // ========== String/Object Encryption ==========
 
 /**
- * Recursively encrypt strings in a PDF object (RC4 mode)
+ * Encode raw bytes into the *escaped* form pdf-lib expects for a literal string.
+ *
+ * pdf-lib writes `PDFString.value` verbatim between `(` and `)` and escapes
+ * nothing (see its own comment in core/objects/PDFString.js). That is fine for
+ * text, but ciphertext is uniformly random binary, so ~40% of encrypted strings
+ * contain a byte that changes the meaning of the literal — silently destroying
+ * the object structure of the file. Escape them here.
+ *
+ * Per ISO 32000-2 §7.3.4.2:
+ *   \  → \\   backslash introduces an escape sequence
+ *   (  → \(   an unbalanced paren ends the string early or swallows objects
+ *   )  → \)
+ *   CR → \r   a raw EOL inside a literal string is normalised to LF on read
+ *   LF → \n   (not strictly required, but keeps the emitted string on one line)
  */
-function encryptStringsRC4(obj, objectNum, generationNum, encryptionKey) {
-  if (!obj) return;
+function bytesToPDFStringValue(bytes) {
+  const out = new Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0x5c) out[i] = '\\\\';        // backslash
+    else if (b === 0x28) out[i] = '\\(';    // (
+    else if (b === 0x29) out[i] = '\\)';    // )
+    else if (b === 0x0d) out[i] = '\\r';    // CR
+    else if (b === 0x0a) out[i] = '\\n';    // LF
+    else out[i] = String.fromCharCode(b);
+  }
+  return out.join('');
+}
+
+/**
+ * ISO 32000-2 §7.6.2: the /Contents entry of a signature dictionary holds the
+ * signature over the rest of the file and shall NOT be encrypted. /Type is
+ * optional on signature dictionaries, so /ByteRange is the reliable marker.
+ */
+function isSignatureDict(dict) {
+  const type = dict.get(PDFName.of('Type'));
+  const typeName = type && typeof type.asString === 'function' ? type.asString() : null;
+  if (typeName === '/Sig' || typeName === '/DocTimeStamp') return true;
+
+  // /Type is optional on a signature dictionary, so fall back to shape. Only do
+  // so when /Type is absent — an explicit non-signature /Type means some other
+  // dictionary happens to use these key names, and leaving its /Contents in
+  // plaintext would leak it.
+  if (typeName !== null) return false;
+  const byteRange = dict.get(PDFName.of('ByteRange'));
+  return byteRange instanceof PDFArray && byteRange.size() === 4 && dict.has(PDFName.of('Contents'));
+}
+
+/** Dictionary keys that must never be encrypted. */
+function skipKey(keyName, isSigDict) {
+  if (keyName === '/Length' || keyName === '/Filter' || keyName === '/DecodeParms') return true;
+  return isSigDict && keyName === '/Contents';
+}
+
+/**
+ * Recursively encrypt strings in a PDF object (RC4 mode)
+ *
+ * `seen` is a document-wide WeakSet. Parsed documents are trees here (indirect
+ * references are `PDFRef`s, which this does not follow), but a programmatically
+ * built document can share or self-reference a *direct* object — which would
+ * otherwise recurse forever or encrypt the same string twice.
+ */
+function encryptStringsRC4(obj, objectNum, generationNum, encryptionKey, seen) {
+  if (!obj || seen.has(obj)) return;
 
   if (obj instanceof PDFString) {
+    seen.add(obj);
     const originalBytes = obj.asBytes();
     const encrypted = encryptObjectRC4(originalBytes, objectNum, generationNum, encryptionKey);
-    obj.value = Array.from(encrypted).map(b => String.fromCharCode(b)).join('');
+    obj.value = bytesToPDFStringValue(encrypted);
   } else if (obj instanceof PDFHexString) {
+    seen.add(obj);
     const originalBytes = obj.asBytes();
     const encrypted = encryptObjectRC4(originalBytes, objectNum, generationNum, encryptionKey);
     obj.value = bytesToHex(encrypted);
   } else if (obj instanceof PDFDict) {
+    seen.add(obj);
+    const isSigDict = isSignatureDict(obj);
     for (const [key, value] of obj.entries()) {
-      const keyName = key.asString();
-      if (keyName !== '/Length' && keyName !== '/Filter' && keyName !== '/DecodeParms') {
-        encryptStringsRC4(value, objectNum, generationNum, encryptionKey);
+      if (!skipKey(key.asString(), isSigDict)) {
+        encryptStringsRC4(value, objectNum, generationNum, encryptionKey, seen);
       }
     }
   } else if (obj instanceof PDFArray) {
+    seen.add(obj);
     for (const element of obj.asArray()) {
-      encryptStringsRC4(element, objectNum, generationNum, encryptionKey);
+      encryptStringsRC4(element, objectNum, generationNum, encryptionKey, seen);
     }
   }
 }
@@ -313,27 +400,31 @@ function encryptStringsRC4(obj, objectNum, generationNum, encryptionKey) {
  * Recursively encrypt strings in a PDF object (AES-256 mode)
  * For AES-256, strings get AES-256-CBC with random IV prepended
  */
-async function encryptStringsAES256(obj, objectNum, generationNum, cryptoKey) {
-  if (!obj) return;
+async function encryptStringsAES256(obj, objectNum, generationNum, cryptoKey, seen) {
+  if (!obj || seen.has(obj)) return;
 
   if (obj instanceof PDFString) {
+    seen.add(obj);
     const originalBytes = obj.asBytes();
     const encrypted = await encryptObjectAES256(originalBytes, cryptoKey);
-    obj.value = Array.from(encrypted).map(b => String.fromCharCode(b)).join('');
+    obj.value = bytesToPDFStringValue(encrypted);
   } else if (obj instanceof PDFHexString) {
+    seen.add(obj);
     const originalBytes = obj.asBytes();
     const encrypted = await encryptObjectAES256(originalBytes, cryptoKey);
     obj.value = bytesToHex(encrypted);
   } else if (obj instanceof PDFDict) {
+    seen.add(obj);
+    const isSigDict = isSignatureDict(obj);
     for (const [key, value] of obj.entries()) {
-      const keyName = key.asString();
-      if (keyName !== '/Length' && keyName !== '/Filter' && keyName !== '/DecodeParms') {
-        await encryptStringsAES256(value, objectNum, generationNum, cryptoKey);
+      if (!skipKey(key.asString(), isSigDict)) {
+        await encryptStringsAES256(value, objectNum, generationNum, cryptoKey, seen);
       }
     }
   } else if (obj instanceof PDFArray) {
+    seen.add(obj);
     for (const element of obj.asArray()) {
-      await encryptStringsAES256(element, objectNum, generationNum, cryptoKey);
+      await encryptStringsAES256(element, objectNum, generationNum, cryptoKey, seen);
     }
   }
 }
@@ -395,6 +486,8 @@ async function encryptPDF_AES256(pdfBytes, userPassword, ownerPassword, options)
       updateMetadata: false
     });
 
+    if (pdfDoc.isEncrypted) throw new AlreadyEncryptedError();
+
     const context = pdfDoc.context;
     const permissions = buildPermissions(options);
 
@@ -405,8 +498,8 @@ async function encryptPDF_AES256(pdfBytes, userPassword, ownerPassword, options)
     const fileKey = randomBytes(32);
 
     // Prepare password bytes
-    const userPwdBytes = saslPrepPassword(userPassword);
-    const ownerPwdBytes = saslPrepPassword(ownerPassword);
+    const userPwdBytes = encodePasswordAES256(userPassword);
+    const ownerPwdBytes = encodePasswordAES256(ownerPassword);
 
     // Algorithm 8: Compute U and UE
     const { U, UE } = await computeUandUE(userPwdBytes, fileKey);
@@ -422,6 +515,7 @@ async function encryptPDF_AES256(pdfBytes, userPassword, ownerPassword, options)
 
     // Encrypt all objects
     const indirectObjects = context.enumerateIndirectObjects();
+    const seen = new WeakSet();
 
     for (const [ref, obj] of indirectObjects) {
       const objectNum = ref.objectNumber;
@@ -450,13 +544,13 @@ async function encryptPDF_AES256(pdfBytes, userPassword, ownerPassword, options)
 
         // Encrypt strings in stream dictionary
         if (obj.dict) {
-          await encryptStringsAES256(obj.dict, objectNum, generationNum, cryptoKey);
+          await encryptStringsAES256(obj.dict, objectNum, generationNum, cryptoKey, seen);
         }
       }
 
       // Encrypt strings in non-stream objects
       if (!(obj instanceof PDFRawStream)) {
-        await encryptStringsAES256(obj, objectNum, generationNum, cryptoKey);
+        await encryptStringsAES256(obj, objectNum, generationNum, cryptoKey, seen);
       }
     }
 
@@ -504,10 +598,15 @@ async function encryptPDF_AES256(pdfBytes, userPassword, ownerPassword, options)
       trailer.ID = [idHex1, idHex2];
     }
 
-    const encryptedBytes = await pdfDoc.save({ useObjectStreams: false });
+    // updateFieldAppearances defaults to true and runs *inside* save(), i.e. AFTER
+    // the encryption pass above — any appearance stream it regenerated would be
+    // written as plaintext into an encrypted file. An encryption pass must not
+    // rewrite content, so turn it off.
+    const encryptedBytes = await pdfDoc.save({ useObjectStreams: false, updateFieldAppearances: false });
     return encryptedBytes;
 
   } catch (error) {
+    if (isCallerError(error)) throw error;
     if (error.message && error.message.startsWith('Unsupported')) throw error;
     throw new Error(`Failed to encrypt PDF (AES-256): ${error.message}`);
   }
@@ -521,6 +620,8 @@ async function encryptPDF_RC4(pdfBytes, userPassword, ownerPassword, options) {
       ignoreEncryption: true,
       updateMetadata: false
     });
+
+    if (pdfDoc.isEncrypted) throw new AlreadyEncryptedError();
 
     const context = pdfDoc.context;
     const permissions = buildPermissions(options);
@@ -538,6 +639,7 @@ async function encryptPDF_RC4(pdfBytes, userPassword, ownerPassword, options) {
 
     // Encrypt all objects
     const indirectObjects = context.enumerateIndirectObjects();
+    const seen = new WeakSet();
 
     for (const [ref, obj] of indirectObjects) {
       const objectNum = ref.objectNumber;
@@ -562,12 +664,12 @@ async function encryptPDF_RC4(pdfBytes, userPassword, ownerPassword, options) {
         obj.contents = encrypted;
 
         if (obj.dict) {
-          encryptStringsRC4(obj.dict, objectNum, generationNum, encryptionKey);
+          encryptStringsRC4(obj.dict, objectNum, generationNum, encryptionKey, seen);
         }
       }
 
       if (!(obj instanceof PDFRawStream)) {
-        encryptStringsRC4(obj, objectNum, generationNum, encryptionKey);
+        encryptStringsRC4(obj, objectNum, generationNum, encryptionKey, seen);
       }
     }
 
@@ -592,10 +694,15 @@ async function encryptPDF_RC4(pdfBytes, userPassword, ownerPassword, options) {
       trailer.ID = [idHex1, idHex2];
     }
 
-    const encryptedBytes = await pdfDoc.save({ useObjectStreams: false });
+    // updateFieldAppearances defaults to true and runs *inside* save(), i.e. AFTER
+    // the encryption pass above — any appearance stream it regenerated would be
+    // written as plaintext into an encrypted file. An encryption pass must not
+    // rewrite content, so turn it off.
+    const encryptedBytes = await pdfDoc.save({ useObjectStreams: false, updateFieldAppearances: false });
     return encryptedBytes;
 
   } catch (error) {
+    if (isCallerError(error)) throw error;
     throw new Error(`Failed to encrypt PDF (RC4): ${error.message}`);
   }
 }
@@ -609,10 +716,16 @@ function getOrCreateFileId(context) {
   const trailer = context.trailerInfo;
   const idArray = trailer.ID;
 
-  if (idArray && Array.isArray(idArray) && idArray.length > 0) {
-    const idString = idArray[0].toString();
-    const hexStr = idString.replace(/^<|>$/g, '');
-    return hexToBytes(hexStr);
+  // trailerInfo.ID is a PDFArray on a parsed document, but a plain JS array if
+  // this function already replaced it. Handle both, and read the value through
+  // asBytes() so a literal `(...)` ID decodes as correctly as a hex `<...>` one.
+  const first = idArray instanceof PDFArray ? idArray.get(0)
+    : (Array.isArray(idArray) && idArray.length > 0) ? idArray[0]
+    : undefined;
+
+  if (first && typeof first.asBytes === 'function') {
+    const bytes = first.asBytes();
+    if (bytes.length > 0) return bytes;
   }
 
   // Generate new file ID

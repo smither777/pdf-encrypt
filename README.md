@@ -4,6 +4,12 @@ Full-featured PDF encryption with **AES-256** and **RC4 128-bit** support. Built
 
 Powers [PDFSmaller.com](https://pdfsmaller.com)'s [Protect PDF](https://pdfsmaller.com/protect-pdf) tool.
 
+> **⚠️ Upgrade to 1.1.0.** Versions 1.0.x wrote encrypted strings into PDF
+> literal strings without escaping them, which corrupted any PDF containing
+> literal strings — form field names, JavaScript actions, metadata. Fields went
+> missing and calculations stopped working, differently on every run. See
+> [CHANGELOG.md](CHANGELOG.md).
+
 ## Features
 
 - **AES-256 encryption** (V=5, R=6) — PDF 2.0 standard, maximum security

@@ -1,6 +1,6 @@
 {
   "name": "@pdfsmaller/pdf-encrypt",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Full-featured PDF encryption with AES-256 and RC4 128-bit support. Built for browsers, Node.js, and edge environments. Powers PDFSmaller.com's encryption.",
   "type": "commonjs",
   "main": "dist/index.js",
@@ -16,7 +16,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "node build.js",
