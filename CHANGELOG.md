@@ -13,11 +13,15 @@ the object structure of the output file.
 
 Any PDF containing literal strings — form field names, appearance strings,
 JavaScript actions, metadata, i.e. effectively all of them — could come back with
-fields missing, JavaScript truncated, or objects swallowed whole. Because the IV
-is random per run, a different part of the document broke each time.
+fields missing, JavaScript truncated, or objects swallowed whole.
 
 Measured on a real Acrobat form with 35 encryptable strings: **0/16 runs produced
 an intact file before this fix, 16/16 after**, across both algorithms.
+
+Output varied from run to run, so a different part of the document broke each
+time: under AES-256 every string gets a fresh random IV, and under RC4 the file
+`/ID` — which feeds the key — was being regenerated on every run by the `/ID` bug
+below.
 
 ### Fixed — spec compliance
 
@@ -63,6 +67,17 @@ normalise differently here than in a conforming implementation. `U+1D2C` folded 
 plain `A`, silently weakening the password. Those characters are now rejected.
 Characters added after Unicode 3.2 that NFKC leaves alone — emoji included —
 still work.
+
+### A note on the version number
+
+Strict SemVer would call this a major bump: `encryptPDF()` now throws for inputs
+1.0.x accepted. It is released as a minor deliberately, because in 1.0.x those
+same calls returned a **silently corrupted PDF** — nothing that genuinely worked
+has broken. Shipping it as a minor means existing `^1.0.x` dependents pick the
+fix up on their next install instead of staying on a version that corrupts every
+PDF containing literal strings.
+
+If you pin exact versions, upgrade explicitly.
 
 ### Internal
 

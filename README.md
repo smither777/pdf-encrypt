@@ -17,7 +17,7 @@ Powers [PDFSmaller.com](https://pdfsmaller.com)'s [Protect PDF](https://pdfsmall
 - **Granular permissions** — control printing, copying, modifying, and more
 - **User + Owner passwords** — separate passwords for opening and managing PDFs
 - **Web Crypto API** — no native dependencies, works everywhere
-- **Lightweight** — ~15KB total (crypto + encryption logic)
+- **Lightweight** — ~17KB gzipped (crypto + encryption + password encoding)
 - **Zero dependencies** — only `pdf-lib` as a peer dependency
 - **TypeScript types** included
 
@@ -126,7 +126,7 @@ const encrypted = await encryptPDF(pdfBytes, 'password', {
 | Package | Description |
 |---------|-------------|
 | [@pdfsmaller/pdf-decrypt](https://www.npmjs.com/package/@pdfsmaller/pdf-decrypt) | Full decryption — AES-256 + RC4 (companion to this package) |
-| [@pdfsmaller/pdf-encrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-encrypt-lite) | Lightweight RC4-only encryption (~7KB) |
+| [@pdfsmaller/pdf-encrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-encrypt-lite) | Lightweight RC4-only encryption (~9KB gzipped) |
 | [@pdfsmaller/pdf-decrypt-lite](https://www.npmjs.com/package/@pdfsmaller/pdf-decrypt-lite) | Lightweight RC4-only decryption (~8KB) |
 
 ## License

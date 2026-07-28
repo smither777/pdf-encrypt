@@ -3,7 +3,7 @@
  * Run: npm test (after npm run build)
  */
 
-const { encryptPDF } = require('./dist/index.js');
+const { encryptPDF, AlreadyEncryptedError, PasswordEncodingError, encodePasswordLegacy, encodePasswordAES256 } = require('./dist/index.js');
 const { PDFDocument } = require('pdf-lib');
 
 async function createTestPDF(text = 'Hello, this is a test PDF!') {
@@ -254,15 +254,20 @@ async function runTests() {
     const enc1 = await encryptPDF(new Uint8Array(pdfBytes), 'pass1', { algorithm: 'RC4' });
     console.log('  First encryption (RC4):', enc1.length, 'bytes');
 
-    // Second encryption (AES-256) — pdf-lib loads with ignoreEncryption
-    const enc2 = await encryptPDF(new Uint8Array(enc1), 'pass2');
-    console.log('  Second encryption (AES-256):', enc2.length, 'bytes');
-
-    const dict = parseEncryptDict(enc2);
-    console.assert(dict.V === 5, 'Re-encrypted should be AES-256');
-
-    const doc = await PDFDocument.load(enc2, { ignoreEncryption: true });
-    console.assert(doc.getPageCount() === 1, 'Should be loadable');
+    // Second encryption must be REFUSED. pdf-lib cannot decrypt, so encrypting
+    // an already-encrypted file used to emit a document that opened with the new
+    // password but whose contents stayed encrypted under a key nobody had.
+    let threw = null;
+    try {
+      await encryptPDF(new Uint8Array(enc1), 'pass2');
+    } catch (err) {
+      threw = err;
+    }
+    console.assert(threw instanceof AlreadyEncryptedError,
+      'Re-encryption should throw AlreadyEncryptedError, got: ' + threw);
+    console.assert(threw && threw.code === 'ALREADY_ENCRYPTED', 'Should carry code ALREADY_ENCRYPTED');
+    if (!(threw instanceof AlreadyEncryptedError)) throw new Error('re-encryption was not rejected');
+    console.log('  Second encryption correctly rejected:', threw.name);
     console.log('  ✅ PASSED\n');
     passed++;
   } catch (e) {
@@ -339,6 +344,65 @@ async function runTests() {
   }
 
   // Summary
+  // Test 14: literal-string escaping — the v1.0.x corruption bug
+  try {
+    console.log('Test 14: Encrypted output re-parses (literal-string escaping)');
+    const pdfDoc = await PDFDocument.create();
+    pdfDoc.addPage();
+    // Names full of characters that become ( ) \\ CR once encrypted are what
+    // destroyed the object structure in 1.0.x.
+    pdfDoc.setTitle('Title (with parens) and \\backslash');
+    pdfDoc.setAuthor('Author \\ ( ) test');
+    pdfDoc.setSubject('Subject with \r carriage return');
+    const bytes = await pdfDoc.save({ useObjectStreams: false });
+
+    // Run repeatedly: corruption depended on the random IV, so one clean run
+    // proved nothing in 1.0.x.
+    for (let i = 0; i < 12; i++) {
+      for (const algorithm of ['AES-256', 'RC4']) {
+        const enc = await encryptPDF(new Uint8Array(bytes), 'pw', { algorithm });
+        const reloaded = await PDFDocument.load(enc, { ignoreEncryption: true });
+        console.assert(reloaded.getPageCount() === 1, `run ${i} ${algorithm}: page lost`);
+        if (reloaded.getPageCount() !== 1) throw new Error(`run ${i} ${algorithm} corrupted`);
+      }
+    }
+    console.log('  24 encryptions (12 runs x 2 algorithms) all re-parsed intact');
+    console.log('  ✅ PASSED\n');
+    passed++;
+  } catch (e) {
+    console.log('  ❌ FAILED:', e.message, '\n');
+    failed++;
+  }
+
+  // Test 15: password encoding per revision
+  try {
+    console.log('Test 15: Password encoding (PDFDocEncoding vs SASLprep)');
+    console.assert(Buffer.from(encodePasswordLegacy('userpw')).toString() === 'userpw', 'ASCII must be unchanged');
+    console.assert(Buffer.from(encodePasswordAES256('userpw')).toString() === 'userpw', 'ASCII must be unchanged');
+    // e-acute is one byte in PDFDocEncoding, two in UTF-8
+    console.assert(encodePasswordLegacy('caf\u00e9').length === 4, 'PDFDocEncoding should be 1 byte/char');
+    console.assert(encodePasswordLegacy('caf\u00e9')[3] === 0xe9, 'e-acute should be 0xE9');
+    // NFKC: precomposed and decomposed must agree
+    console.assert(
+      Buffer.from(encodePasswordAES256('caf\u00e9')).toString('hex') ===
+      Buffer.from(encodePasswordAES256('cafe\u0301')).toString('hex'),
+      'NFKC should normalise decomposed input');
+
+    let e1 = null;
+    try { encodePasswordLegacy('pass\u4e2d'); } catch (err) { e1 = err; }
+    console.assert(e1 instanceof PasswordEncodingError, 'non-PDFDocEncoding char should throw');
+    let e2 = null;
+    try { encodePasswordAES256('\u1d2c'); } catch (err) { e2 = err; }
+    console.assert(e2 instanceof PasswordEncodingError && e2.code === 'UNSTABLE_PASSWORD_CHARACTER',
+      'NFKC-unstable char should throw');
+    if (!e1 || !e2) throw new Error('password validation did not reject bad input');
+    console.log('  ✅ PASSED\n');
+    passed++;
+  } catch (e) {
+    console.log('  ❌ FAILED:', e.message, '\n');
+    failed++;
+  }
+
   console.log('━'.repeat(40));
   console.log(`Results: ${passed} passed, ${failed} failed`);
   console.log('━'.repeat(40));
