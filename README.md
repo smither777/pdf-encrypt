@@ -40,6 +40,61 @@ const encrypted = await encryptPDF(new Uint8Array(pdfBytes), 'my-password');
 fs.writeFileSync('encrypted.pdf', encrypted);
 ```
 
+## Browser (no bundler)
+
+For environments with no build step — SharePoint script editors, classic ASP.NET
+pages, plain HTML — use the UMD build. It reads pdf-lib from the global that
+`pdf-lib.min.js` installs, so load that first:
+
+```html
+<script src="pdf-lib.min.js"></script>
+<script src="node_modules/@pdfsmaller/pdf-encrypt/dist/pdf-encrypt.umd.js"></script>
+<script>
+  (async () => {
+    const bytes = new Uint8Array(await (await fetch('form.pdf')).arrayBuffer());
+
+    // Pre-fill with pdf-lib as usual…
+    const doc = await PDFLib.PDFDocument.load(bytes);
+    doc.getForm().getTextField('Name').setText('Marco Foerster');
+    const filled = await doc.save();
+
+    // …then apply permissions. Empty user password = opens with no prompt.
+    const protectedPdf = await PDFEncrypt.encryptPDF(filled, '', {
+      ownerPassword: 'owner-secret',
+      allowPrinting: true,
+      allowFillingForms: true,   // also covers signing an existing signature field
+      allowModifying: false,
+      allowCopying: false,
+    });
+  })();
+</script>
+```
+
+`PDFEncrypt` is the global; everything the package exports is on it.
+
+> **Secure context required for AES-256.** `crypto.subtle` is only exposed over
+> HTTPS or on localhost. If your site is served over plain HTTP, AES-256 will
+> fail — pass `{ algorithm: 'RC4' }`, which does not use `crypto.subtle`.
+> RC4 still needs `crypto.getRandomValues()` to generate a file ID when the
+> source PDF has none; browsers expose that in non-secure contexts, so this
+> works over HTTP, but it is not a no-Web-Crypto-at-all fallback.
+> Note that RC4 is cryptographically weak; it is fine for declaring
+> permissions, not for confidentiality.
+
+### Permissions without an open password
+
+Passing an empty string as the user password produces a PDF that opens without
+prompting but still declares its permissions; conforming readers require the
+owner password to change them:
+
+```js
+await PDFEncrypt.encryptPDF(pdfBytes, '', { ownerPassword: 'owner-secret', allowPrinting: true });
+```
+
+Be aware that PDF permissions are advisory: conforming readers honour them, but
+nothing cryptographically prevents a determined tool from ignoring them. Use a
+user password if the content itself must stay confidential.
+
 ## API
 
 ### `encryptPDF(pdfBytes, userPassword, options?)`
@@ -62,7 +117,7 @@ fs.writeFileSync('encrypted.pdf', encrypted);
 | `allowModifying` | `boolean` | `true` | Allow modifying content |
 | `allowCopying` | `boolean` | `true` | Allow copying text/images |
 | `allowAnnotating` | `boolean` | `true` | Allow adding annotations |
-| `allowFillingForms` | `boolean` | `true` | Allow form filling |
+| `allowFillingForms` | `boolean` | `true` | Allow filling existing form fields, including signing an existing signature field (ISO 32000-2 Table 22, bit 9 — applies even when `allowAnnotating` is false) |
 | `allowExtraction` | `boolean` | `true` | Allow accessibility extraction |
 | `allowAssembly` | `boolean` | `true` | Allow document assembly |
 | `allowHighQualityPrint` | `boolean` | `true` | Allow high-quality printing |

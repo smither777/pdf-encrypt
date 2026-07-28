@@ -106,6 +106,80 @@ export { md5, RC4, hexToBytes, bytesToHex } from './crypto-rc4.mjs';
 export { sha256, sha384, sha512, aes256CbcEncrypt, aes256CbcEncryptNoPad, aes256EcbEncryptBlock, computeHash2B, concat } from './crypto-aes.mjs';
 `.trim() + '\n');
 
+// ========== Browser (UMD) bundle ==========
+
+/**
+ * A single <script>-tag build, for environments with no bundler and no module
+ * loader — SharePoint script editors, classic ASP.NET pages, plain HTML.
+ *
+ * pdf-lib is NOT bundled: it stays a peer dependency and is read from the
+ * global `PDFLib` that pdf-lib.min.js already installs, exactly as a consumer
+ * would load it. Include pdf-lib.min.js first, then this file, then call
+ * `PDFEncrypt.encryptPDF(...)`.
+ */
+function buildUMD() {
+  const PDF_LIB_NAMES = [
+    'PDFDocument', 'PDFName', 'PDFHexString', 'PDFString',
+    'PDFDict', 'PDFArray', 'PDFRawStream', 'PDFNumber',
+  ];
+
+  const bodies = MODULES.map(({ file }) =>
+    read(file)
+      // pdf-lib comes from the factory argument; relative imports are moot once
+      // every module is concatenated into one scope.
+      .replace(/import\s*\{[^}]+\}\s*from\s*['"][^'"]+['"];?/g, '')
+      .replace(/^export\s+(async\s+function|function|class|const|let|var)\s+/gm, '$1 ')
+      .replace(/^export\s*\{[^}]*\}\s*;?[ \t]*$/gm, '')
+      .trim()
+  ).join('\n\n');
+
+  const umd = `/**
+ * @pdfsmaller/pdf-encrypt v${require('./package.json').version} — browser (UMD) build
+ *
+ * Requires pdf-lib to be loaded first (it provides the global \`PDFLib\`):
+ *
+ *   <script src="pdf-lib.min.js"></script>
+ *   <script src="pdf-encrypt.umd.js"></script>
+ *   <script>
+ *     const bytes = await PDFEncrypt.encryptPDF(pdfBytes, '', {
+ *       ownerPassword: 'secret', allowPrinting: true, allowFillingForms: true,
+ *     });
+ *   </script>
+ *
+ * NOTE: AES-256 uses Web Crypto (crypto.subtle), which browsers expose only in
+ * a secure context — HTTPS or localhost. Over plain HTTP, use
+ * { algorithm: 'RC4' }, which is pure JavaScript.
+ *
+ * @license MIT
+ * @see https://pdfsmaller.com/protect-pdf
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) {
+    module.exports = factory(require('pdf-lib'));
+  } else if (typeof define === 'function' && define.amd) {
+    define(['pdf-lib'], factory);
+  } else {
+    if (!root.PDFLib) {
+      throw new Error('pdf-encrypt: global "PDFLib" not found — load pdf-lib.min.js before this file.');
+    }
+    root.PDFEncrypt = factory(root.PDFLib);
+  }
+}(typeof self !== 'undefined' ? self : this, function (PDFLib) {
+  'use strict';
+
+${PDF_LIB_NAMES.map((n) => `  var ${n} = PDFLib.${n};`).join('\n')}
+
+${bodies.split('\n').map((l) => (l ? '  ' + l : l)).join('\n')}
+
+  return { ${PUBLIC_API.join(', ')} };
+}));
+`;
+
+  fs.writeFileSync(path.join(distDir, 'pdf-encrypt.umd.js'), umd);
+}
+
+buildUMD();
+
 // ========== TypeScript Declarations ==========
 
 fs.writeFileSync(path.join(distDir, 'index.d.ts'), `

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0 — 2026-07-28
+
+### Added
+
+- **UMD browser build** at `dist/pdf-encrypt.umd.js`, for environments with no
+  bundler and no module loader (SharePoint script editors, classic ASP.NET
+  pages, plain HTML). Load `pdf-lib.min.js` first, then this file, then use the
+  `PDFEncrypt` global. pdf-lib is not bundled — it stays a peer dependency and
+  is read from the global that pdf-lib itself installs.
+- Documented how to protect a PDF with **permissions but no open password**
+  (empty user password + owner password), and the secure-context requirement
+  for AES-256 in the browser.
+
 ## 1.1.0 — 2026-07-28
 
 **Upgrade immediately. 1.0.x produced corrupted PDFs.**
